@@ -346,67 +346,28 @@ pub(crate) fn connect_host(
     hostname: &str,
     port: u16,
 ) -> Result<(TcpStream, SocketAddr), Error> {
-    let connect_deadline: Option<Instant> =
-        if let Some(timeout_connect) = unit.agent.config.timeout_connect {
-            Instant::now().checked_add(timeout_connect)
-        } else {
-            unit.deadline
-        };
     let proxy: Option<Proxy> = unit.agent.config.proxy.clone();
     let netloc = match proxy {
         Some(ref proxy) => format!("{}:{}", proxy.server, proxy.port),
         None => format!("{}:{}", hostname, port),
     };
 
-    // TODO: Find a way to apply deadline to DNS lookup.
-    let sock_addrs = unit.resolver().resolve(&netloc).map_err(|e| {
-        ErrorKind::Dns
-            .msg(format!("resolve dns name '{}'", netloc))
-            .src(e)
-    })?;
-
-    if sock_addrs.is_empty() {
-        return Err(ErrorKind::Dns.msg(format!("No ip address for {}", hostname)));
-    }
-
     let proto = proxy.as_ref().map(|proxy| proxy.proto);
 
     let mut any_err = None;
     let mut any_stream_and_addr = None;
-    // Find the first sock_addr that accepts a connection
-    for sock_addr in sock_addrs {
-        // ensure connect timeout or overall timeout aren't yet hit.
-        let timeout = match connect_deadline {
-            Some(deadline) => Some(time_until_deadline(deadline)?),
-            None => None,
-        };
 
-        debug!("connecting to {} at {}", netloc, &sock_addr);
+    debug!("connecting to {}", netloc);
 
-        // connect with a configured timeout.
-        #[allow(clippy::unnecessary_unwrap)]
-        let stream = if proto.is_some() && Some(Proto::HTTP) != proto {
-            connect_socks(
-                unit,
-                proxy.clone().unwrap(),
-                connect_deadline,
-                sock_addr,
-                hostname,
-                port,
-                proto.unwrap(),
-            )
-        } else if let Some(timeout) = timeout {
-            TcpStream::connect_timeout(&sock_addr, timeout)
-        } else {
-            TcpStream::connect(sock_addr)
-        };
+    // connect
+    let stream = TcpStream::connect(netloc);
 
-        if let Ok(stream) = stream {
-            any_stream_and_addr = Some((stream, sock_addr));
-            break;
-        } else if let Err(err) = stream {
-            any_err = Some(err);
-        }
+
+    if let Ok(stream) = stream {
+        let socket_addr = stream.peer_addr()?;
+        any_stream_and_addr = Some((stream, socket_addr));
+    } else if let Err(err) = stream {
+        any_err = Some(err);
     }
 
     let (mut stream, remote_addr) = if let Some(stream_and_addr) = any_stream_and_addr {
